@@ -26,6 +26,7 @@ from dataset import CustomDataset
 from diffusers.models import AutoencoderKL
 # import wandb_utils
 import wandb
+wandb.init(mode="offline")
 import math
 from torchvision.utils import make_grid
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
@@ -120,9 +121,7 @@ def requires_grad(model, flag=True):
 def main(args):    
     # set accelerator
     logging_dir = Path(args.output_dir, args.logging_dir)
-    accelerator_project_config = ProjectConfiguration(
-        project_dir=args.output_dir, logging_dir=logging_dir
-        )
+    accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
 
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
@@ -136,14 +135,14 @@ def main(args):
         save_dir = os.path.join(args.output_dir, args.exp_name)
         os.makedirs(save_dir, exist_ok=True)
         args_dict = vars(args)
-        # Save to a JSON file
-        json_dir = os.path.join(save_dir, "args.json")
+        json_dir = os.path.join(save_dir, "args.json") # Save to a JSON file
         with open(json_dir, 'w') as f:
             json.dump(args_dict, f, indent=4)
         checkpoint_dir = f"{save_dir}/checkpoints"  # Stores saved model checkpoints
         os.makedirs(checkpoint_dir, exist_ok=True)
         logger = create_logger(save_dir)
         logger.info(f"Experiment directory created at {save_dir}")
+
     device = accelerator.device
     if torch.backends.mps.is_available():
         accelerator.native_amp = False    
@@ -155,9 +154,7 @@ def main(args):
     latent_size = args.resolution // 8
 
     if args.enc_type != None:
-        encoders, encoder_types, architectures = load_encoders(
-            args.enc_type, device, args.resolution
-            )
+        encoders, encoder_types, architectures = load_encoders(args.enc_type, device, args.resolution)
     else:
         raise NotImplementedError()
     z_dims = [encoder.embed_dim for encoder in encoders] if args.enc_type != 'None' else [0]
@@ -176,12 +173,8 @@ def main(args):
     vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-mse").to(device)
     requires_grad(ema, False)
     
-    latents_scale = torch.tensor(
-        [0.18215, 0.18215, 0.18215, 0.18215]
-        ).view(1, 4, 1, 1).to(device)
-    latents_bias = torch.tensor(
-        [0., 0., 0., 0.]
-        ).view(1, 4, 1, 1).to(device)
+    latents_scale = torch.tensor([0.18215, 0.18215, 0.18215, 0.18215]).view(1, 4, 1, 1).to(device)
+    latents_bias = torch.tensor([0., 0., 0., 0.]).view(1, 4, 1, 1).to(device)
 
     # create loss function
     loss_fn = SILoss(
@@ -233,34 +226,28 @@ def main(args):
     if args.resume_step > 0:
         ckpt_name = str(args.resume_step).zfill(7) +'.pt'
         ckpt = torch.load(
-            f'{os.path.join(args.output_dir, args.exp_name)}/checkpoints/{ckpt_name}',
-            map_location='cpu',
-            )
+            f'{os.path.join(args.output_dir, args.exp_name)}/checkpoints/{ckpt_name}', map_location='cpu',
+        )
         model.load_state_dict(ckpt['model'])
         ema.load_state_dict(ckpt['ema'])
         optimizer.load_state_dict(ckpt['opt'])
         global_step = ckpt['steps']
 
-    model, optimizer, train_dataloader = accelerator.prepare(
-        model, optimizer, train_dataloader
-    )
+    model, optimizer, train_dataloader = accelerator.prepare(model, optimizer, train_dataloader)
 
     if accelerator.is_main_process:
         tracker_config = vars(copy.deepcopy(args))
         accelerator.init_trackers(
             project_name="REPA", 
             config=tracker_config,
-            init_kwargs={
-                "wandb": {"name": f"{args.exp_name}"}
-            },
+            init_kwargs={"wandb": {"name": f"{args.exp_name}"}},
         )
         
     progress_bar = tqdm(
         range(0, args.max_train_steps),
         initial=global_step,
         desc="Steps",
-        # Only show the progress bar once on each machine.
-        disable=not accelerator.is_local_main_process,
+        disable=not accelerator.is_local_main_process,  # Only show the progress bar once on each machine.
     )
 
     # Labels to condition the model with (feel free to change):
@@ -268,10 +255,8 @@ def main(args):
     gt_raw_images, gt_xs, _ = next(iter(train_dataloader))
     assert gt_raw_images.shape[-1] == args.resolution
     gt_xs = gt_xs[:sample_batch_size]
-    gt_xs = sample_posterior(
-        gt_xs.to(device), latents_scale=latents_scale, latents_bias=latents_bias
-        )
-    ys = torch.randint(1000, size=(sample_batch_size,), device=device)
+    gt_xs = sample_posterior(gt_xs.to(device), latents_scale=latents_scale, latents_bias=latents_bias)
+    ys = torch.randint(args.num_classes, size=(sample_batch_size,), device=device)
     ys = ys.to(device)
     # Create sampling noise:
     n = ys.size(0)
@@ -342,15 +327,8 @@ def main(args):
                 from samplers import euler_sampler
                 with torch.no_grad():
                     samples = euler_sampler(
-                        model, 
-                        xT, 
-                        ys,
-                        num_steps=50, 
-                        cfg_scale=4.0,
-                        guidance_low=0.,
-                        guidance_high=1.,
-                        path_type=args.path_type,
-                        heun=False,
+                        model, xT, ys, num_steps=50, cfg_scale=4.0,
+                        guidance_low=0., guidance_high=1., path_type=args.path_type, heun=False,
                     ).to(torch.float32)
                     samples = vae.decode((samples -  latents_bias) / latents_scale).sample
                     gt_samples = vae.decode((gt_xs - latents_bias) / latents_scale).sample
@@ -387,53 +365,53 @@ def parse_args(input_args=None):
     parser = argparse.ArgumentParser(description="Training")
 
     # logging:
-    parser.add_argument("--output-dir", type=str, default="exps")
-    parser.add_argument("--exp-name", type=str, required=True)
-    parser.add_argument("--logging-dir", type=str, default="logs")
-    parser.add_argument("--report-to", type=str, default="wandb")
-    parser.add_argument("--sampling-steps", type=int, default=10000)
-    parser.add_argument("--resume-step", type=int, default=0)
+    parser.add_argument("--output_dir", type=str, default="exps")
+    parser.add_argument("--exp_name", type=str, required=True)
+    parser.add_argument("--logging_dir", type=str, default="logs")
+    parser.add_argument("--report_to", type=str, default="wandb")
+    parser.add_argument("--sampling_steps", type=int, default=10000)
+    parser.add_argument("--resume_step", type=int, default=0)
 
     # model
     parser.add_argument("--model", type=str)
-    parser.add_argument("--num-classes", type=int, default=1000)
-    parser.add_argument("--encoder-depth", type=int, default=8)
-    parser.add_argument("--fused-attn", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--qk-norm",  action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--num_classes", type=int, default=1000)
+    parser.add_argument("--encoder_depth", type=int, default=8)
+    parser.add_argument("--fused_attn", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--qk_norm",  action=argparse.BooleanOptionalAction, default=False)
 
     # dataset
-    parser.add_argument("--data-dir", type=str, default="../data/imagenet256")
+    parser.add_argument("--data_dir", type=str, default="../data/imagenet256")
     parser.add_argument("--resolution", type=int, choices=[256, 512], default=256)
-    parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--batch_size", type=int, default=256)
 
     # precision
-    parser.add_argument("--allow-tf32", action="store_true")
-    parser.add_argument("--mixed-precision", type=str, default="fp16", choices=["no", "fp16", "bf16"])
+    parser.add_argument("--allow_tf32", action="store_true")
+    parser.add_argument("--mixed_precision", type=str, default="fp16", choices=["no", "fp16", "bf16"])
 
     # optimization
     parser.add_argument("--epochs", type=int, default=1400)
-    parser.add_argument("--max-train-steps", type=int, default=400000)
-    parser.add_argument("--checkpointing-steps", type=int, default=50000)
-    parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
-    parser.add_argument("--learning-rate", type=float, default=1e-4)
-    parser.add_argument("--adam-beta1", type=float, default=0.9, help="The beta1 parameter for the Adam optimizer.")
-    parser.add_argument("--adam-beta2", type=float, default=0.999, help="The beta2 parameter for the Adam optimizer.")
-    parser.add_argument("--adam-weight-decay", type=float, default=0., help="Weight decay to use.")
-    parser.add_argument("--adam-epsilon", type=float, default=1e-08, help="Epsilon value for the Adam optimizer")
-    parser.add_argument("--max-grad-norm", default=1.0, type=float, help="Max gradient norm.")
+    parser.add_argument("--max_train_steps", type=int, default=400000)
+    parser.add_argument("--checkpointing_steps", type=int, default=50000)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
+    parser.add_argument("--learning_rate", type=float, default=1e-4)
+    parser.add_argument("--adam_beta1", type=float, default=0.9, help="The beta1 parameter for the Adam optimizer.")
+    parser.add_argument("--adam_beta2", type=float, default=0.999, help="The beta2 parameter for the Adam optimizer.")
+    parser.add_argument("--adam_weight_decay", type=float, default=0., help="Weight decay to use.")
+    parser.add_argument("--adam_epsilon", type=float, default=1e-08, help="Epsilon value for the Adam optimizer")
+    parser.add_argument("--max_grad_norm", default=1.0, type=float, help="Max gradient norm.")
 
     # seed
     parser.add_argument("--seed", type=int, default=0)
 
     # cpu
-    parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--num_workers", type=int, default=8)
 
     # loss
-    parser.add_argument("--path-type", type=str, default="linear", choices=["linear", "cosine"])
+    parser.add_argument("--path_type", type=str, default="linear", choices=["linear", "cosine"])
     parser.add_argument("--prediction", type=str, default="v", choices=["v"]) # currently we only support v-prediction
-    parser.add_argument("--cfg-prob", type=float, default=0.1)
-    parser.add_argument("--enc-type", type=str, default='dinov2-vit-b')
-    parser.add_argument("--proj-coeff", type=float, default=0.5)
+    parser.add_argument("--cfg_prob", type=float, default=0.1)
+    parser.add_argument("--enc_type", type=str, default='dinov2-vit-b')
+    parser.add_argument("--proj_coeff", type=float, default=0.5)
     parser.add_argument("--weighting", default="uniform", type=str, help="Max gradient norm.")
     parser.add_argument("--legacy", action=argparse.BooleanOptionalAction, default=False)
 
