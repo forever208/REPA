@@ -7,9 +7,7 @@ from pathlib import Path
 from collections import OrderedDict
 import json
 
-import numpy as np
 import torch
-import torch.nn.functional as F
 import torch.utils.checkpoint
 from tqdm.auto import tqdm
 from torch.utils.data import DataLoader
@@ -31,6 +29,10 @@ import math
 from torchvision.utils import make_grid
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from torchvision.transforms import Normalize
+from samplers import euler_sampler, euler_maruyama_sampler
+from PIL import Image
+import shutil
+from tools.fid_score import calculate_fid_given_paths
 
 logger = get_logger(__name__)
 
@@ -119,7 +121,7 @@ def requires_grad(model, flag=True):
 #################################################################################
 
 def main(args):    
-    # set accelerator
+    # set accelerator and log
     logging_dir = Path(args.output_dir, args.logging_dir)
     accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
 
@@ -142,6 +144,8 @@ def main(args):
         os.makedirs(checkpoint_dir, exist_ok=True)
         logger = create_logger(save_dir)
         logger.info(f"Experiment directory created at {save_dir}")
+    else:
+        logger = None
 
     device = accelerator.device
     if torch.backends.mps.is_available():
@@ -149,7 +153,7 @@ def main(args):
     if args.seed is not None:
         set_seed(args.seed + accelerator.process_index)
     
-    # Create model:
+    # Create DINO, SiT, VAE:
     assert args.resolution % 8 == 0, "Image size must be divisible by 8 (for the VAE encoder)."
     latent_size = args.resolution // 8
 
@@ -243,25 +247,7 @@ def main(args):
             init_kwargs={"wandb": {"name": f"{args.exp_name}"}},
         )
         
-    progress_bar = tqdm(
-        range(0, args.max_train_steps),
-        initial=global_step,
-        desc="Steps",
-        disable=not accelerator.is_local_main_process,  # Only show the progress bar once on each machine.
-    )
-
-    # Labels to condition the model with (feel free to change):
-    sample_batch_size = 64 // accelerator.num_processes
-    gt_raw_images, gt_xs, _ = next(iter(train_dataloader))
-    assert gt_raw_images.shape[-1] == args.resolution
-    gt_xs = gt_xs[:sample_batch_size]
-    gt_xs = sample_posterior(gt_xs.to(device), latents_scale=latents_scale, latents_bias=latents_bias)
-    ys = torch.randint(args.num_classes, size=(sample_batch_size,), device=device)
-    ys = ys.to(device)
-    # Create sampling noise:
-    n = ys.size(0)
-    xT = torch.randn((n, 4, latent_size, latent_size), device=device)
-        
+    progress_bar = tqdm(range(0, args.max_train_steps), initial=global_step, desc="Steps", disable=not accelerator.is_local_main_process)
     for epoch in range(args.epochs):
         model.train()
         for raw_image, x, y in train_dataloader:
@@ -288,6 +274,7 @@ def main(args):
                         if 'dinov2' in encoder_type: z = z['x_norm_patchtokens']
                         zs.append(z)
 
+            grad_norm = torch.tensor(0.0, device=device)
             with accelerator.accumulate(model):
                 model_kwargs = dict(y=labels)
                 loss, proj_loss = loss_fn(model, x, model_kwargs, zs=zs)
@@ -306,7 +293,7 @@ def main(args):
                 if accelerator.sync_gradients:
                     update_ema(ema, model) # change ema function
             
-            ### enter
+            ### save ckpt
             if accelerator.sync_gradients:
                 progress_bar.update(1)
                 global_step += 1                
@@ -323,43 +310,95 @@ def main(args):
                     torch.save(checkpoint, checkpoint_path)
                     logger.info(f"Saved checkpoint to {checkpoint_path}")
 
-            if (global_step == 1 or (global_step % args.sampling_steps == 0 and global_step > 0)):
-                from samplers import euler_sampler
-                with torch.no_grad():
-                    samples = euler_sampler(
-                        model, xT, ys, num_steps=50, cfg_scale=4.0,
-                        guidance_low=0., guidance_high=1., path_type=args.path_type, heun=False,
-                    ).to(torch.float32)
-                    samples = vae.decode((samples -  latents_bias) / latents_scale).sample
-                    gt_samples = vae.decode((gt_xs - latents_bias) / latents_scale).sample
-                    samples = (samples + 1) / 2.
-                    gt_samples = (gt_samples + 1) / 2.
-                out_samples = accelerator.gather(samples.to(torch.float32))
-                gt_samples = accelerator.gather(gt_samples.to(torch.float32))
-                accelerator.log({"samples": wandb.Image(array2grid(out_samples)),
-                                 "gt_samples": wandb.Image(array2grid(gt_samples))})
-                logging.info("Generating EMA samples done.")
-
+            ### logging info
             logs = {
                 "loss": accelerator.gather(loss_mean).mean().detach().item(), 
                 "proj_loss": accelerator.gather(proj_loss_mean).mean().detach().item(),
                 "grad_norm": accelerator.gather(grad_norm).mean().detach().item()
             }
             progress_bar.set_postfix(**logs)
-            accelerator.log(logs, step=global_step)
+
+            if accelerator.is_main_process and (global_step == 1 or global_step % args.log_every == 0):
+                logger.info(
+                    f"step={global_step} "
+                    f"loss={logs['loss']:.6f} proj_loss={logs['proj_loss']:.6f} grad_norm={logs['grad_norm']:.3f}"
+                )
+                accelerator.log(logs, step=global_step)  # wandb log
+
+            ### FID evaluation
+            if global_step % args.checkpointing_steps == 0 and global_step > 0:
+                torch.cuda.empty_cache()
+                if accelerator.is_main_process:
+                    os.makedirs(args.sample_path, exist_ok=True)
+                    logger.info(f"FID evaluation at steps {global_step}, samples are in {args.sample_path}")
+
+                ema.eval()
+                assert args.cfg_scale >= 1.0, "In almost all cases, cfg_scale be >= 1.0"
+
+                # generate samples and save into the folder
+                num_iterations = int(args.num_samples // args.batch_size + 1)
+                mini_batch_size = args.batch_size // accelerator.num_processes
+                world_size = accelerator.state.num_processes
+                local_rank = accelerator.state.local_process_index
+                in_channels = getattr(ema, "in_channels")
+
+                for i in tqdm(range(num_iterations), disable=not accelerator.is_main_process, desc='sample2dir'):
+                    z = torch.randn(mini_batch_size, in_channels, latent_size, latent_size, device=device)
+                    y = torch.randint(0, args.num_classes, (mini_batch_size,), device=device)
+                    sampling_kwargs = dict(
+                        model=ema,  # use ema model for sampling
+                        latents=z,
+                        y=y,
+                        num_steps=args.num_steps,
+                        heun=args.heun,
+                        cfg_scale=args.cfg_scale,
+                        guidance_low=args.guidance_low,
+                        guidance_high=args.guidance_high,
+                        path_type=args.path_type,
+                    )
+
+                    with torch.no_grad():
+                        if args.mode == "sde":
+                            samples = euler_maruyama_sampler(**sampling_kwargs).to(torch.float32)
+                        elif args.mode == "ode":
+                            samples = euler_sampler(**sampling_kwargs).to(torch.float32)
+                        else:
+                            raise NotImplementedError()
+
+                        latents_scale = torch.tensor([0.18215, 0.18215, 0.18215, 0.18215, ]).view(1, 4, 1, 1).to(device)
+                        latents_bias = -torch.tensor([0., 0., 0., 0., ]).view(1, 4, 1, 1).to(device)
+                        samples = vae.decode((samples - latents_bias) / latents_scale).sample
+                        samples = (samples + 1) / 2.
+                        samples = torch.clamp(255. * samples, 0, 255).permute(0, 2, 3, 1).to("cpu", dtype=torch.uint8).numpy()
+
+                        for b_id, sample in enumerate(samples):  # distributed image save
+                            img_id = i * mini_batch_size * world_size + local_rank * mini_batch_size + b_id
+                            if img_id >= args.num_samples:
+                                break
+                            Image.fromarray(sample).save(f"{args.sample_path}/{img_id:06d}.png")
+
+                accelerator.wait_for_everyone()
+                if accelerator.is_main_process:
+                    _fid = calculate_fid_given_paths((args.fid_stat, args.sample_path))
+                    logger.info(f'step={global_step} fid{args.num_samples}={_fid}')
+                    with open(os.path.join(args.output_dir, f'eval_{args.mode}_{args.num_samples}.log'), 'a') as f:
+                        print(f'step={global_step} fid{args.num_samples}={_fid}', file=f)
+                    shutil.rmtree(args.sample_path)  # remove all generated images
+
+                torch.cuda.empty_cache()
+                accelerator.wait_for_everyone()
+                model.train()
 
             if global_step >= args.max_train_steps:
                 break
         if global_step >= args.max_train_steps:
             break
-
-    model.eval()  # important! This disables randomized embedding dropout
-    # do any sampling/FID calculation/etc. with ema (or model) in eval mode ...
     
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         logger.info("Done!")
     accelerator.end_training()
+
 
 def parse_args(input_args=None):
     parser = argparse.ArgumentParser(description="Training")
@@ -371,6 +410,7 @@ def parse_args(input_args=None):
     parser.add_argument("--report_to", type=str, default="wandb")
     parser.add_argument("--sampling_steps", type=int, default=10000)
     parser.add_argument("--resume_step", type=int, default=0)
+    parser.add_argument("--log_every", type=int, default=100)
 
     # model
     parser.add_argument("--model", type=str)
@@ -414,6 +454,18 @@ def parse_args(input_args=None):
     parser.add_argument("--proj_coeff", type=float, default=0.5)
     parser.add_argument("--weighting", default="uniform", type=str, help="Max gradient norm.")
     parser.add_argument("--legacy", action=argparse.BooleanOptionalAction, default=False)
+
+    # FID evaluation
+    parser.add_argument("--sample_path", type=str, default=None, required=True)
+    parser.add_argument("--num_samples", type=int, default=50000)
+    parser.add_argument("--num_steps", type=int, default=100)
+    parser.add_argument("--mode", type=str, default="ode")
+    parser.add_argument("--cfg_scale", type=float, default=1.8)
+    parser.add_argument("--heun", action=argparse.BooleanOptionalAction, default=False)  # only for ode
+    parser.add_argument("--guidance_low", type=float, default=0.)
+    parser.add_argument("--guidance_high", type=float, default=0.7)
+    parser.add_argument("--fid_stat", type=str, default=None, required=True)
+
 
     if input_args is not None:
         args = parser.parse_args(input_args)

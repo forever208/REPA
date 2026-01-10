@@ -69,20 +69,19 @@ def main(args):
         encoder_depth=args.encoder_depth,
         **block_kwargs,
     ).to(device)
-    # Auto-download a pre-trained model or load a custom SiT checkpoint from train.py:
+
     ckpt_path = args.ckpt
-    if ckpt_path is None:
+    if ckpt_path is None:  # Auto-download a pre-trained model
         args.ckpt = 'SiT-XL-2-256x256.pt'
         assert args.model == 'SiT-XL/2'
         assert len(args.projector_embed_dims.split(',')) == 1
         assert int(args.projector_embed_dims.split(',')[0]) == 768
         state_dict = download_model('last.pt')
-    else:
+    else:  # load a custom trained SiT checkpoint
         state_dict = torch.load(ckpt_path, map_location=f'cuda:{device}')['ema']
+
     if args.legacy:
-        state_dict = load_legacy_checkpoints(
-            state_dict=state_dict, encoder_depth=args.encoder_depth
-            )
+        state_dict = load_legacy_checkpoints(state_dict=state_dict, encoder_depth=args.encoder_depth)
     model.load_state_dict(state_dict)
     model.eval()  # important!
     vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-{args.vae}").to(device)
@@ -141,17 +140,11 @@ def main(args):
             else:
                 raise NotImplementedError()
 
-            latents_scale = torch.tensor(
-                [0.18215, 0.18215, 0.18215, 0.18215, ]
-                ).view(1, 4, 1, 1).to(device)
-            latents_bias = -torch.tensor(
-                [0., 0., 0., 0.,]
-                ).view(1, 4, 1, 1).to(device)
+            latents_scale = torch.tensor([0.18215, 0.18215, 0.18215, 0.18215, ]).view(1, 4, 1, 1).to(device)
+            latents_bias = -torch.tensor([0., 0., 0., 0.,]).view(1, 4, 1, 1).to(device)
             samples = vae.decode((samples -  latents_bias) / latents_scale).sample
             samples = (samples + 1) / 2.
-            samples = torch.clamp(
-                255. * samples, 0, 255
-                ).permute(0, 2, 3, 1).to("cpu", dtype=torch.uint8).numpy()
+            samples = torch.clamp(255. * samples, 0, 255).permute(0, 2, 3, 1).to("cpu", dtype=torch.uint8).numpy()
 
             # Save samples to disk as individual .png files
             for i, sample in enumerate(samples):
@@ -208,7 +201,6 @@ if __name__ == "__main__":
 
     # will be deprecated
     parser.add_argument("--legacy", action=argparse.BooleanOptionalAction, default=False) # only for ode
-
 
     args = parser.parse_args()
     main(args)
