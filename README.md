@@ -24,8 +24,12 @@
 ### 1. Environment setup
 
 ```bash
-conda create -n repa python=3.9 -y
+conda create -n repa python=3.10 -y
 conda activate repa
+pip install -r requirements.txt
+
+# if any issue with wandb install, try
+conda install -c conda-forge wandb
 pip install -r requirements.txt
 ```
 
