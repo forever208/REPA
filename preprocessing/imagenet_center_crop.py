@@ -1,0 +1,291 @@
+import os
+import torch
+import numpy as np
+from PIL import Image
+from transformers import CLIPTokenizer, CLIPTextModel
+from pathlib import Path
+from tqdm import tqdm
+from multiprocessing import Pool, cpu_count
+from functools import partial
+
+
+def count_num_params(model):
+    total = 0
+    for param in model.parameters():
+        total += param.numel()
+
+    suffixes = ['', 'K', 'M', 'B', 'T']
+
+    # Find the magnitude of the number (i.e., how many powers of 1000 it has)
+    magnitude = 0
+    while abs(total) >= 1000 and magnitude < len(suffixes) - 1:
+        magnitude += 1
+        total /= 1000.0
+
+    # Format the number with 1 decimal place
+    return f"{total:.1f}{suffixes[magnitude]}"
+
+
+def save_orig_and_generated_images(original_images, generated_image_tensors, path_to_save_folder, step, accelerator):
+    if not os.path.isdir(path_to_save_folder):
+        accelerator.print(f"Creating Folder {path_to_save_folder} to save Reconstructions")
+        os.makedirs(path_to_save_folder)
+
+    ### Clamp Output Between [-1 to 1] and rescale back to [0 to 255] ###
+    generated_image_tensors = generated_image_tensors.float()
+    generated_image_tensors = torch.clamp(generated_image_tensors, -1., 1.)
+    generated_image_tensors = (generated_image_tensors + 1) / 2
+    generated_image_tensors = generated_image_tensors.cpu().permute(0, 2, 3, 1).numpy()
+    generated_image_tensors = np.round(255 * generated_image_tensors).astype(np.uint8)
+    gen_imgs = [Image.fromarray(img).convert("RGB") for img in generated_image_tensors]
+
+    ### Original Images have been scaled to [-1 to 1], rescale back to [0 to 255] ###
+    original_images = original_images.float()
+    original_images = (original_images + 1) / 2
+    original_images = original_images.cpu().permute(0, 2, 3, 1).numpy()
+    original_images = np.round(255 * original_images).astype(np.uint8)
+    orig_imgs = [Image.fromarray(img).convert("RGB") for img in original_images]
+
+    ### Concat Images (so we can compare real vs reconstruction) ###
+    img_width = orig_imgs[0].width
+    img_height = orig_imgs[0].height
+    combined_images = []
+    for orig_img, gen_img in zip(orig_imgs, gen_imgs):
+        combined_img = Image.new(mode="RGB", size=(img_width, 2 * img_height))
+        combined_img.paste(orig_img, (0, 0))
+        combined_img.paste(gen_img, (0, img_height))
+        combined_images.append(combined_img)
+
+    ### Concatenate All Samples Together ###
+    final_image = Image.new(mode="RGB", size=(img_width * len(combined_images), 2 * img_height))
+    x_offset = 0
+    for img in combined_images:
+        final_image.paste(img, (x_offset, 0))
+        x_offset += img_width
+
+    ### Save Output ###
+    path_to_save = os.path.join(path_to_save_folder, f"iteration_{step}.png")
+    final_image.save(path_to_save)
+
+
+def convert_to_PIL_imgs(image_tensors):
+    # Clamp output between [-1, 1] and rescale to [0, 255]
+    image_tensors = image_tensors.float()
+    image_tensors = torch.clamp(image_tensors, -1., 1.)
+    image_tensors = (image_tensors + 1) / 2
+    image_tensors = image_tensors.cpu().permute(0, 2, 3, 1).numpy()
+    image_tensors = np.round(255 * image_tensors).astype(np.uint8)
+
+    # Convert each tensor to a PIL image
+    return [Image.fromarray(img).convert("RGB") for img in image_tensors]
+
+
+def save_generated_images(generated_image_tensors, path_to_save_folder=None, step=None, path_to_save=None):
+    """
+    Quick helper function where:
+    Args:
+        - path_to_save_folder: Directory you want to save image
+        - step: What iteration of training (expected when using path_to_save_folder)
+        - path_to_save: Full path to .png if you want to save an individual image
+    """
+
+    ### Clamp Output Between [-1 to 1] and rescale back to [0 to 255] ###
+    generated_image_tensors = generated_image_tensors.float()
+    generated_image_tensors = torch.clamp(generated_image_tensors, -1., 1.)
+    generated_image_tensors = (generated_image_tensors + 1) / 2
+    generated_image_tensors = generated_image_tensors.cpu().permute(0, 2, 3, 1).numpy()
+    generated_image_tensors = np.round(255 * generated_image_tensors).astype(np.uint8)
+    gen_imgs = [Image.fromarray(img).convert("RGB") for img in generated_image_tensors]
+
+    if path_to_save_folder is not None:
+        if step is not None:
+            path_to_save = os.path.join(path_to_save_folder, f"iteration_{step}.png")
+
+    ### Concat Images (so we can compare real vs reconstruction) ###
+    img_width = gen_imgs[0].width
+    img_height = gen_imgs[0].height
+
+    ### Concatenate All Samples Together ###
+    final_image = Image.new(mode="RGB", size=(img_width * len(gen_imgs), img_height))
+    x_offset = 0
+    for img in gen_imgs:
+        final_image.paste(img, (x_offset, 0))
+        x_offset += img_width
+
+    final_image.save(path_to_save)
+
+
+def load_testing_text_encodings(path_to_text="inputs/sample_text_cond_prompts.txt",
+                                model="openai/clip-vit-large-patch14"):
+    tokenizer = CLIPTokenizer.from_pretrained(model)
+    model = CLIPTextModel.from_pretrained(model).eval()
+
+    ### Load Text ###
+    with open(path_to_text, "r") as f:
+        text = f.readlines()
+
+    text = [t.strip() for t in text]
+    tokenized = tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=77)
+
+    with torch.no_grad():
+        text_embeddings = model(**tokenized).last_hidden_state
+
+    sample_text_emb = {
+        "text_conditioning": text_embeddings,
+        "text_attention_mask": tokenized["attention_mask"].bool()
+    }
+
+    return sample_text_emb
+
+
+def center_crop_arr(pil_image, image_size):
+    """
+    Center cropping implementation from ADM.
+    https://github.com/openai/guided-diffusion/blob/8fb3ad9197f16bbc40620447b2742e13458d2831/guided_diffusion/image_datasets.py#L126
+    """
+    while min(*pil_image.size) >= 2 * image_size:
+        pil_image = pil_image.resize(
+            tuple(x // 2 for x in pil_image.size), resample=Image.BOX
+        )
+
+    scale = image_size / min(*pil_image.size)
+    pil_image = pil_image.resize(
+        tuple(round(x * scale) for x in pil_image.size), resample=Image.BICUBIC
+    )
+
+    arr = np.array(pil_image)
+    crop_y = (arr.shape[0] - image_size) // 2
+    crop_x = (arr.shape[1] - image_size) // 2
+    return Image.fromarray(arr[crop_y: crop_y + image_size, crop_x: crop_x + image_size])
+
+
+# def center_crop_imagenet_train(root_dir=None, image_size=256):
+#     root_dir = Path(root_dir)
+#     exts = {".jpg", ".jpeg", ".png", ".bmp", ".gif"}
+#
+#     # Collect image paths recursively
+#     img_paths = [p for p in root_dir.rglob("*") if p.suffix.lower() in exts]
+#
+#     for img_path in tqdm(img_paths, desc="Center cropping", unit="img"):
+#         try:
+#             img = Image.open(img_path).convert("RGB")
+#             cropped = center_crop_arr(img, image_size)
+#
+#             # --- force lowercase suffix ---
+#             lower_ext = img_path.suffix.lower()
+#             new_path = img_path.with_suffix(lower_ext)
+#
+#             # overwrite using new lowercase filename
+#             cropped.save(new_path)
+#
+#             # delete old file if suffix changed
+#             if new_path != img_path:
+#                 img_path.unlink()
+#
+#         except Exception as e:
+#             print(f"[ERROR] {img_path}: {e}")
+#
+#
+# def center_crop_imagenet_val(root_dir=None, image_size=256):
+#     root_dir = Path(root_dir)
+#     exts = {".jpg", ".jpeg", ".png", ".bmp", ".gif"}
+#
+#     # collect only files directly under the folder
+#     img_paths = [
+#         p for p in root_dir.iterdir()
+#         if p.is_file() and p.suffix.lower() in exts
+#     ]
+#
+#     for img_path in tqdm(img_paths, desc="Center cropping (val)", unit="img"):
+#         try:
+#             img = Image.open(img_path).convert("RGB")
+#             cropped = center_crop_arr(img, image_size)
+#
+#             # --- force lowercase suffix ---
+#             lower_ext = img_path.suffix.lower()
+#             new_path = img_path.with_suffix(lower_ext)
+#
+#             # overwrite using new lowercase filename
+#             cropped.save(new_path)
+#
+#             # if the filename changed (e.g. .JPEG → .jpeg), remove the old file
+#             if new_path != img_path:
+#                 img_path.unlink()
+#
+#         except Exception as e:
+#             print(f"[ERROR] {img_path}: {e}")
+
+
+def process_one_image(img_path, image_size):
+    try:
+        img = Image.open(img_path).convert("RGB")
+        cropped = center_crop_arr(img, image_size)
+
+        lower_ext = img_path.suffix.lower()
+        new_path = img_path.with_suffix(lower_ext)
+        cropped.save(new_path)
+
+        if new_path != img_path:
+            img_path.unlink()
+    except Exception as e:
+        print(f"[ERROR] {img_path}: {e}")
+
+
+def center_crop_imagenet_train_mp(root_dir, image_size=256):
+    root_dir = Path(root_dir)
+    exts = {".jpg", ".jpeg", ".png", ".bmp", ".gif"}
+
+    img_paths = [p for p in root_dir.rglob("*") if p.suffix.lower() in exts]
+
+    with Pool(cpu_count()) as pool:
+        list(tqdm(
+            pool.imap_unordered(partial(process_one_image, image_size=image_size), img_paths),
+            total=len(img_paths),
+            desc="Cropping (MP)"
+        ))
+
+
+def process_one_val_image(img_path, image_size):
+    try:
+        img = Image.open(img_path).convert("RGB")
+        cropped = center_crop_arr(img, image_size)
+
+        # --- force lowercase suffix ---
+        lower_ext = img_path.suffix.lower()
+        new_path = img_path.with_suffix(lower_ext)
+
+        # save with lowercase suffix
+        cropped.save(new_path)
+
+        # remove old uppercase file if changed
+        if new_path != img_path:
+            img_path.unlink()
+    except Exception as e:
+        print(f"[ERROR] {img_path}: {e}")
+
+
+def center_crop_imagenet_val_mp(root_dir=None, image_size=256):
+    root_dir = Path(root_dir)
+    exts = {".jpg", ".jpeg", ".png", ".bmp", ".gif"}
+
+    # collect only files directly under the folder
+    img_paths = [
+        p for p in root_dir.iterdir()
+        if p.is_file() and p.suffix.lower() in exts
+    ]
+
+    # multiprocessing
+    with Pool(cpu_count()) as pool:
+        list(tqdm(
+            pool.imap_unordered(
+                partial(process_one_val_image, image_size=image_size),
+                img_paths
+            ),
+            total=len(img_paths),
+            desc="Center cropping (val, MP)",
+            unit="img"
+        ))
+
+
+if __name__ == "__main__":
+    center_crop_imagenet_train_mp(root_dir='/data/scratch/datasets/imagenet256/train', image_size=256)
