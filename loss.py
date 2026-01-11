@@ -81,10 +81,10 @@ class SILoss:
         proj_loss = 0.
         bsz = zs[0].shape[0]
         for i, (z, z_tilde) in enumerate(zip(zs, zs_tilde)):
-            for j, (z_j, z_tilde_j) in enumerate(zip(z, z_tilde)):
-                z_tilde_j = torch.nn.functional.normalize(z_tilde_j, dim=-1) 
+            for j, (z_j, z_tilde_j) in enumerate(zip(z, z_tilde)):  # (num_tokens, dim)
+                z_tilde_j = torch.nn.functional.normalize(z_tilde_j, dim=-1)  # L2-norm for each token
                 z_j = torch.nn.functional.normalize(z_j, dim=-1) 
-                proj_loss += mean_flat(-(z_j * z_tilde_j).sum(dim=-1))
-        proj_loss /= (len(zs) * bsz)
+                proj_loss += mean_flat(-(z_j * z_tilde_j).sum(dim=-1))  # cosine similarity per token
+        proj_loss /= (len(zs) * bsz)  # better alignment --> loss close to -1
 
         return denoising_loss, proj_loss

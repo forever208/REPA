@@ -269,7 +269,7 @@ def main(args):
                 with accelerator.autocast():
                     for encoder, encoder_type, arch in zip(encoders, encoder_types, architectures):
                         raw_image_ = preprocess_raw_image(raw_image, encoder_type)
-                        z = encoder.forward_features(raw_image_)
+                        z = encoder.forward_features(raw_image_)  # (batch, tokens, dim)
                         if 'mocov3' in encoder_type: z = z = z[:, 1:] 
                         if 'dinov2' in encoder_type: z = z['x_norm_patchtokens']
                         zs.append(z)
