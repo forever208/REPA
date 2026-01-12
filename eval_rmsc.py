@@ -31,6 +31,7 @@ logger = get_logger(__name__)
 
 CLIP_DEFAULT_MEAN = (0.48145466, 0.4578275, 0.40821073)
 CLIP_DEFAULT_STD = (0.26862954, 0.26130258, 0.27577711)
+from utils import SpatialNormalization, ALL_SPNORM_METHODS
 
 
 def preprocess_raw_image(x, enc_type):
@@ -205,6 +206,7 @@ def rmsc_evaluation(args):
     sum_rmsc_z = 0.0
     sum_rmsc_dino = 0.0
     sum_rmsc_loss = 0.0
+    spnorm = SpatialNormalization("zscore")
 
     progress = tqdm(disable=not accelerator.is_local_main_process, desc="Eval", dynamic_ncols=True)
     it = iter(loader)
@@ -227,18 +229,24 @@ def rmsc_evaluation(args):
             zs = []
             for encoder, encoder_type, arch in zip(encoders, encoder_types, architectures):
                 raw_image_ = preprocess_raw_image(raw_image, encoder_type)
-                z = encoder.forward_features(raw_image_)  # (B, tokens, dim) or dict for dinov2
-                if 'mocov3' in encoder_type:
-                    z = z[:, 1:]
-                if 'dinov2' in encoder_type:
-                    z = z['x_norm_patchtokens']
+                features = encoder.forward_features(raw_image_)  # (B, tokens, dim) or dict for dinov2
+
+                # normalize spatial features
+                spnorm_kwargs = {
+                    'feat': features['x_norm_patchtokens'],
+                    'cls': features['x_norm_clstoken'],
+                    'cls_weight': 0.2,
+                    'zscore_alpha': 0.6,
+                    'zscore_proj_skip_std': False,
+                }
+                z = spnorm(**spnorm_kwargs)
                 zs.append(z)
 
             rmsc_dino = rmsc_tokens(zs[0])  # (B,)
 
         # rmsc_x exactly like training
         _, _, hx, wx = raw_image.shape  # uint8 [0,255]
-        x_img = raw_image.float() / 127.5 - 1.0
+        x_img = raw_image.float() / 255.0  # value range [0, 1] before rmsc eval
         if args.gaussian_blur:
             x_img = gaussian_blur(x_img, kernel_size=7, sigma=1.2)
         downsam_x = downsample_to(x_img, (hx // 8, wx // 8))

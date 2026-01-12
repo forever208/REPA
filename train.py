@@ -35,6 +35,7 @@ from PIL import Image
 import shutil
 from tools.fid_score import calculate_fid_given_paths
 from utils import gaussian_blur, downsample_to, rmsc, rmsc_tokens
+from utils import SpatialNormalization, ALL_SPNORM_METHODS
 
 logger = get_logger(__name__)
 
@@ -248,7 +249,9 @@ def main(args):
             config=tracker_config,
             init_kwargs={"wandb": {"name": f"{args.exp_name}"}},
         )
-        
+
+    spnorm = SpatialNormalization("zscore")
+
     progress_bar = tqdm(range(0, args.max_train_steps), initial=global_step, desc="Steps", disable=not accelerator.is_local_main_process)
     for epoch in range(args.epochs):
         model.train()
@@ -271,9 +274,18 @@ def main(args):
                 with accelerator.autocast():
                     for encoder, encoder_type, arch in zip(encoders, encoder_types, architectures):
                         raw_image_ = preprocess_raw_image(raw_image, encoder_type)
-                        z = encoder.forward_features(raw_image_)  # (batch, tokens, dim)
-                        if 'mocov3' in encoder_type: z = z = z[:, 1:] 
-                        if 'dinov2' in encoder_type: z = z['x_norm_patchtokens']
+                        features = encoder.forward_features(raw_image_)  # (batch, tokens, dim)
+
+                        # normalize spatial features
+                        spnorm_kwargs = {
+                            'feat': features['x_norm_patchtokens'],
+                            'cls': features['x_norm_clstoken'],
+                            'cls_weight': 0.2,
+                            'zscore_alpha': 0.6,
+                            'zscore_proj_skip_std': False,
+                        }
+                        z = spnorm(**spnorm_kwargs)
+
                         zs.append(z)
 
                 rmsc_dino = rmsc_tokens(zs[0])
@@ -282,11 +294,11 @@ def main(args):
             with accelerator.accumulate(model):
                 # rmsc
                 _, _, hx, wx = raw_image.shape  # (batch, c, h, w) unit8, value range [0, 255]
-                raw_image = raw_image.float() / 127.5 - 1.0  # value range [-1, 1] before rmsc eval
+                raw_image = raw_image.float() / 255.0  # value range [0, 1] before rmsc eval
                 if args.gaussian_blur:
                     raw_image = gaussian_blur(raw_image, kernel_size=7, sigma=1.2)
                 downsam_x = downsample_to(raw_image, (hx//8, wx//8))
-                rmsc_x = rmsc(downsam_x, patch_sz=1)  # (batch, )
+                rmsc_x = rmsc(downsam_x, patch_sz=2)  # patch size should match the diffusion patch size, (B,)
 
                 model_kwargs = dict(y=labels)
                 loss, proj_loss, rmsc_z = loss_fn(model, x, model_kwargs, zs=zs)
