@@ -74,7 +74,7 @@ class SILoss:
             model_target = d_alpha_t * images + d_sigma_t * noises
         else:
             raise NotImplementedError() # TODO: add x or eps prediction
-        model_output, zs_tilde  = model(model_input, time_input.flatten(), **model_kwargs)
+        model_output, zs_tilde, rmsc_z  = model(model_input, time_input.flatten(), **model_kwargs)
         denoising_loss = mean_flat((model_output - model_target) ** 2)
 
         # projection loss
@@ -87,4 +87,4 @@ class SILoss:
                 proj_loss += mean_flat(-(z_j * z_tilde_j).sum(dim=-1))  # cosine similarity per token
         proj_loss /= (len(zs) * bsz)  # better alignment --> loss close to -1
 
-        return denoising_loss, proj_loss
+        return denoising_loss, proj_loss, rmsc_z

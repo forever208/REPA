@@ -11,6 +11,7 @@ import torch.nn as nn
 import numpy as np
 import math
 from timm.models.vision_transformer import PatchEmbed, Attention, Mlp
+from utils import rmsc_tokens
 
 
 def build_mlp(hidden_size, projector_dim, z_dim):
@@ -280,11 +281,12 @@ class SiT(nn.Module):
         for i, block in enumerate(self.blocks):
             x = block(x, c)                      # (N, T, D)
             if (i + 1) == self.encoder_depth:
+                rmsc_z = rmsc_tokens(x)
                 zs = [projector(x.reshape(-1, D)).reshape(N, T, -1) for projector in self.projectors]
         x = self.final_layer(x, c)                # (N, T, patch_size ** 2 * out_channels)
         x = self.unpatchify(x)                   # (N, out_channels, H, W)
 
-        return x, zs
+        return x, zs, rmsc_z
 
 
 #################################################################################

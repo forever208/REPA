@@ -11,6 +11,7 @@ import torch
 import torch.utils.checkpoint
 from tqdm.auto import tqdm
 from torch.utils.data import DataLoader
+import torch.nn.functional as F
 
 from accelerate import Accelerator
 from accelerate.logging import get_logger
@@ -33,6 +34,7 @@ from samplers import euler_sampler, euler_maruyama_sampler
 from PIL import Image
 import shutil
 from tools.fid_score import calculate_fid_given_paths
+from utils import gaussian_blur, downsample_to, rmsc, rmsc_tokens
 
 logger = get_logger(__name__)
 
@@ -274,13 +276,24 @@ def main(args):
                         if 'dinov2' in encoder_type: z = z['x_norm_patchtokens']
                         zs.append(z)
 
+                rmsc_dino = rmsc_tokens(zs[0])
+
             grad_norm = torch.tensor(0.0, device=device)
             with accelerator.accumulate(model):
+                # rmsc
+                _, _, hx, wx = raw_image.shape  # (batch, c, h, w) unit8, value range [0, 255]
+                raw_image = raw_image.float() / 127.5 - 1.0  # value range [-1, 1] before rmsc eval
+                if args.gaussian_blur:
+                    raw_image = gaussian_blur(raw_image, kernel_size=7, sigma=1.2)
+                downsam_x = downsample_to(raw_image, (hx//8, wx//8))
+                rmsc_x = rmsc(downsam_x, patch_sz=1)  # (batch, )
+
                 model_kwargs = dict(y=labels)
-                loss, proj_loss = loss_fn(model, x, model_kwargs, zs=zs)
+                loss, proj_loss, rmsc_z = loss_fn(model, x, model_kwargs, zs=zs)
                 loss_mean = loss.mean()
                 proj_loss_mean = proj_loss.mean()
-                loss = loss_mean + proj_loss_mean * args.proj_coeff
+                rmsc_loss = F.mse_loss(rmsc_x, rmsc_z)  # scaler
+                loss = loss_mean + proj_loss_mean * args.proj_coeff + rmsc_loss * args.rmsc_weight
                     
                 ## optimization
                 accelerator.backward(loss)
@@ -314,14 +327,19 @@ def main(args):
             logs = {
                 "loss": accelerator.gather(loss_mean).mean().detach().item(), 
                 "proj_loss": accelerator.gather(proj_loss_mean).mean().detach().item(),
-                "grad_norm": accelerator.gather(grad_norm).mean().detach().item()
+                "grad_norm": accelerator.gather(grad_norm).mean().detach().item(),
+                "rmsc_x": accelerator.gather(rmsc_x).mean().detach().item(),
+                "rmsc_z": accelerator.gather(rmsc_z).mean().detach().item(),
+                "rmsc_dino": accelerator.gather(rmsc_dino).mean().detach().item(),
+                "rmsc_loss": accelerator.gather(rmsc_loss).mean().detach().item(),
             }
             progress_bar.set_postfix(**logs)
 
             if accelerator.is_main_process and (global_step == 1 or global_step % args.log_every == 0):
                 logger.info(
                     f"step={global_step} "
-                    f"loss={logs['loss']:.6f} proj_loss={logs['proj_loss']:.6f} grad_norm={logs['grad_norm']:.3f}"
+                    f"loss={logs['loss']:.6f} proj_loss={logs['proj_loss']:.6f} grad_norm={logs['grad_norm']:.3f} "
+                    f"rmsc_x={logs['rmsc_x']:.6f} rmsc_z={logs['rmsc_z']:.6f} rmsc_dino={logs['rmsc_dino']:.6f} rmsc_loss={logs['rmsc_loss']:.6f}"
                 )
                 accelerator.log(logs, step=global_step)  # wandb log
 
@@ -454,6 +472,8 @@ def parse_args(input_args=None):
     parser.add_argument("--proj_coeff", type=float, default=0.5)
     parser.add_argument("--weighting", default="uniform", type=str, help="Max gradient norm.")
     parser.add_argument("--legacy", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--rmsc_weight", type=float, default=1.0)
+    parser.add_argument("--gaussian_blur", action=argparse.BooleanOptionalAction, default=False, help="gaussian blurring for downsampled image before rmsc eval")
 
     # FID evaluation
     parser.add_argument("--sample_path", type=str, default=None, required=True)

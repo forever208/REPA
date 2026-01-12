@@ -6,6 +6,7 @@ import timm
 from models import mocov3_vit
 import math
 import warnings
+import torch.nn.functional as F
 
 
 # code from SiT repository
@@ -213,3 +214,124 @@ def load_legacy_checkpoints(state_dict, encoder_depth):
         else:
             new_state_dict[key] = value
     return new_state_dict
+
+
+def gaussian_kernel2d(kernel_size: int, sigma: float, device=None, dtype=None):
+    assert kernel_size % 2 == 1, "kernel_size should be odd"
+    ax = torch.arange(kernel_size, device=device, dtype=dtype) - (kernel_size // 2)
+    xx, yy = torch.meshgrid(ax, ax, indexing="ij")
+    k = torch.exp(-(xx**2 + yy**2) / (2 * sigma**2))
+    return k / k.sum()
+
+
+def gaussian_blur(x: torch.Tensor, kernel_size: int = 7, sigma: float = 1.2):
+    """
+    x: (B,C,H,W) -> blurred x: (B,C,H,W)
+    """
+    if x.dtype == torch.uint8:
+        x = x.float() / 255.0
+    else:
+        x = x.float()
+
+    B, C, H, W = x.shape
+    k = gaussian_kernel2d(kernel_size, sigma, device=x.device, dtype=x.dtype)
+    k = k.view(1, 1, kernel_size, kernel_size).repeat(C, 1, 1, 1)  # (C,1,K,K)
+    pad = kernel_size // 2
+    return F.conv2d(x, k, padding=pad, groups=C)
+
+
+def downsample_to(x: torch.Tensor, size_hw: tuple[int, int]):
+    if x.dtype == torch.uint8:
+        x = x.float() / 255.0
+    else:
+        x = x.float()
+
+    return F.interpolate(x, size=size_hw, mode="bicubic", align_corners=False)
+
+
+def rmsc(x: torch.Tensor, patch_sz: int = 1, eps: float = 1e-12) -> torch.Tensor:
+    """
+    RMS Spatial Contrast (RMSC) where each patch token is formed by *stacking*
+    a (patch_sz x patch_sz) block into the channel dimension (no pooling).
+
+    Args:
+        x: Tensor (B, C, H, W)
+        patch_sz: 1, 2, 4, ... must divide H and W
+        eps: numerical stability
+
+    Returns:
+        Tensor (B,)
+    """
+    if x.dim() != 4:
+        raise ValueError(f"x must be 4D (B,C,H,W), got {tuple(x.shape)}")
+    if patch_sz <= 0:
+        raise ValueError(f"patch_sz must be positive, got {patch_sz}")
+
+    B, C, H, W = x.shape
+    if (H % patch_sz) != 0 or (W % patch_sz) != 0:
+        raise ValueError(f"patch_sz={patch_sz} must divide H and W, got H={H}, W={W}")
+
+    Hp, Wp = H // patch_sz, W // patch_sz
+    T = Hp * Wp
+
+    if patch_sz == 1:
+        # tokens: (B, C, T)
+        xt = x.reshape(B, C, T)
+    else:
+        # Split into non-overlapping patches and stack patch pixels into channel dim:
+        # (B, C, H, W)
+        # -> (B, C, Hp, patch_sz, Wp, patch_sz)
+        # -> (B, Hp, Wp, C, patch_sz, patch_sz)
+        # -> (B, Hp*Wp, C*patch_sz*patch_sz)
+        # -> (B, C*patch_sz*patch_sz, T)
+        xt = (
+            x.view(B, C, Hp, patch_sz, Wp, patch_sz)
+             .permute(0, 2, 4, 1, 3, 5)
+             .reshape(B, T, C * patch_sz * patch_sz)
+             .transpose(1, 2)
+        )
+
+    # L2-normalize each token vector over "channel" dim: (B, C', T)
+    xt_hat = xt / xt.norm(p=2, dim=1, keepdim=True).clamp_min(eps)
+
+    # Mean of normalized tokens across spatial locations: (B, C', 1)
+    x_bar = xt_hat.mean(dim=2, keepdim=True)
+
+    # Per-token squared L2 distance to mean: (B, T)
+    sq_dist = (xt_hat - x_bar).pow(2).sum(dim=1)
+
+    # RMSC per sample: (B,)
+    return torch.sqrt(sq_dist.mean(dim=1).clamp_min(eps))
+
+
+def rmsc_tokens(x: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+    """
+    RMS Spatial Contrast (RMSC) for token features that are already flattened.
+
+    This matches your previous definition (with per-token L2 normalization):
+        u_t = x_t / ||x_t||_2
+        RMSC = sqrt( (1/T) * sum_t ||u_t - mean(u)||_2^2 )
+
+    Args:
+        x: Tensor of shape (B, T, C) where
+           B = batch, T = num_tokens, C = channels/features per token.
+        eps: numerical stability.
+
+    Returns:
+        Tensor of shape (B,)
+    """
+    if x.dim() != 3:
+        raise ValueError(f"x must be 3D (B,T,C), got {tuple(x.shape)}")
+
+    # (B, T, C)
+    # L2-normalize each token over channel dim
+    x_hat = x / x.norm(p=2, dim=-1, keepdim=True).clamp_min(eps)
+
+    # Mean token over spatial tokens: (B, 1, C)
+    x_bar = x_hat.mean(dim=1, keepdim=True)
+
+    # Per-token squared L2 distance to mean: (B, T)
+    sq_dist = (x_hat - x_bar).pow(2).sum(dim=-1)
+
+    # RMSC per sample: (B,)
+    return torch.sqrt(sq_dist.mean(dim=1).clamp_min(eps))
