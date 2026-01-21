@@ -373,3 +373,58 @@ class SpatialNormalization:
             return feat
         alpha = kwargs.get('zscore_alpha', 1.0)
         return spatial_zscore(feat, alpha=alpha, eps=self.eps)
+
+
+def tokens_to_grid(z: torch.Tensor) -> torch.Tensor:
+    # z: (B, T, D) with T=H*W
+    B, T, D = z.shape
+    H = W = int(math.isqrt(T))
+    assert H * W == T, f"T must be square, got T={T}"
+    return z.view(B, H, W, D).permute(0, 3, 1, 2).contiguous()  # (B, D, H, W)
+
+
+def grid_to_tokens(g: torch.Tensor) -> torch.Tensor:
+    # g: (B, D, H, W)
+    B, D, H, W = g.shape
+    return g.permute(0, 2, 3, 1).reshape(B, H * W, D).contiguous()
+
+
+def _gaussian_kernel2d(k: int, sigma: float, device, dtype):
+    ax = torch.arange(k, device=device, dtype=dtype) - (k - 1) / 2
+    xx, yy = torch.meshgrid(ax, ax, indexing="ij")
+    kernel = torch.exp(-(xx**2 + yy**2) / (2 * sigma**2))
+    kernel = kernel / kernel.sum()
+    return kernel
+
+
+def gaussian_blur_depthwise(x: torch.Tensor, k: int, sigma: float) -> torch.Tensor:
+    # x: (B, C, H, W)
+    B, C, H, W = x.shape
+    kernel = _gaussian_kernel2d(k, sigma, x.device, x.dtype)  # (k,k)
+    weight = kernel.view(1, 1, k, k).repeat(C, 1, 1, 1)       # (C,1,k,k)
+    pad = k // 2
+    return F.conv2d(x, weight, padding=pad, groups=C)
+
+
+def dog_tokens(z: torch.Tensor, sigma1: float = 0.8, sigma2: float = 1.6,
+               k1: int = 7, k2: int = 11) -> torch.Tensor:
+    """
+    DoG band-pass for tokens: blur(sigma1) - blur(sigma2).
+    z: (B, T, D)
+    returns: (B, T, D)
+    """
+    g = tokens_to_grid(z)  # (B, D, 16, 16)
+    b1 = gaussian_blur_depthwise(g, k1, sigma1)
+    b2 = gaussian_blur_depthwise(g, k2, sigma2)
+    return grid_to_tokens(b1 - b2)
+
+
+def gaussian_blur_tokens(z: torch.Tensor, sigma2: float = 1.6, k2: int = 11) -> torch.Tensor:
+    """
+    DoG band-pass for tokens: blur(sigma1) - blur(sigma2).
+    z: (B, T, D)
+    returns: (B, T, D)
+    """
+    g = tokens_to_grid(z)  # (B, D, 16, 16)
+    b2 = gaussian_blur_depthwise(g, k2, sigma2)
+    return grid_to_tokens(b2)

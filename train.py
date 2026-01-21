@@ -35,7 +35,7 @@ from PIL import Image
 import shutil
 from tools.fid_score import calculate_fid_given_paths
 from utils import gaussian_blur, downsample_to, rmsc, rmsc_tokens
-from utils import SpatialNormalization, ALL_SPNORM_METHODS
+from utils import SpatialNormalization, ALL_SPNORM_METHODS, dog_tokens, gaussian_blur_tokens
 
 logger = get_logger(__name__)
 
@@ -233,7 +233,7 @@ def main(args):
     if args.resume_step > 0:
         ckpt_name = str(args.resume_step).zfill(7) +'.pt'
         ckpt = torch.load(
-            f'{os.path.join(args.output_dir, args.exp_name)}/checkpoints/{ckpt_name}', map_location='cpu',
+            f'{os.path.join(args.output_dir, args.exp_name)}/checkpoints/{ckpt_name}', map_location='cpu', weights_only=False
         )
         model.load_state_dict(ckpt['model'])
         ema.load_state_dict(ckpt['ema'])
@@ -284,7 +284,17 @@ def main(args):
                             'zscore_alpha': 0.6,
                             'zscore_proj_skip_std': False,
                         }
-                        z = spnorm(**spnorm_kwargs)
+                        # z = spnorm(**spnorm_kwargs)
+
+                        # DoG
+                        z = dog_tokens(features['x_norm_patchtokens'], sigma1=0.1, sigma2=9, k1=7, k2=17)
+                        std = features['x_norm_patchtokens'].std(dim=1, keepdim=True)
+                        z = z / (std + 1e-6)
+
+                        # # one-side DoG (Z score is a spacial case)
+                        # z_low_pass = gaussian_blur_tokens(features['x_norm_patchtokens'], sigma2=2.8, k2=17)
+                        # std = features['x_norm_patchtokens'].std(dim=1, keepdim=True)
+                        # z = (features['x_norm_patchtokens'] - 0.6 * z_low_pass) / (std + 1e-6)
 
                         zs.append(z)
 
@@ -356,7 +366,7 @@ def main(args):
                 accelerator.log(logs, step=global_step)  # wandb log
 
             ### FID evaluation
-            if global_step % args.checkpointing_steps == 0 and global_step > 0:
+            if global_step % args.checkpointing_steps == 0 and global_step > 90000:
                 torch.cuda.empty_cache()
                 if accelerator.is_main_process:
                     os.makedirs(args.sample_path, exist_ok=True)
