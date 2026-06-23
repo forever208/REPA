@@ -20,20 +20,27 @@ python dataset_tools.py encode --source=[TARGET_PATH]/images \
 ```
 
 
+#### Complete ImageNet 256 data process
+
+```bash
+mkdir train
+mkdir val
+tar xvf ILSVRC2012_img_train.tar -C ./train
+tar xvf ILSVRC2012_img_val.tar -C ./val
+bash unzip_imgnet.sh
+```
+
 ```bash
 # multi-GPU preprocessing
 torchrun --nproc_per_node=4 preprocess.py \
-    --source=[YOUR_DOWNLOAD_PATH]/ILSVRC/Data/CLS-LOC/train \
-    --dest=[TARGET_PATH]/vae-sd \
-    --dest-images=[TARGET_PATH]/images \
-    --batch-size=128 \
-    --resolution=256 \
-    --transform=center-crop-dhariwal
+--source=/data/scratch/datasets/imagenet256/train \
+--dest=/data/scratch/datasets/imagenet256_repa/vae-sd \
+--dest-images=/data/scratch/datasets/imagenet256_repa/images \
+--batch-size=128 \
+--resolution=256 \
+--transform=center-crop-dhariwal
 ```
 
-Here,
-
-Here,`YOUR_DOWNLOAD_PATH` is the directory that you downloaded the dataset, and `TARGET_PATH` is the directory that you will save the preprocessed images and corresponding compressed latent vectors. This directory will be used for your experiment scripts. 
 
 ## Acknowledgement
 
