@@ -22,9 +22,6 @@ from utils import load_encoders
 
 from dataset import CustomDataset
 from diffusers.models import AutoencoderKL
-# import wandb_utils
-import wandb
-wandb.init(mode="offline")
 import math
 from torchvision.utils import make_grid
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
@@ -124,11 +121,12 @@ def main(args):
     # set accelerator and log
     logging_dir = Path(args.output_dir, args.logging_dir)
     accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
+    report_to = None if args.report_to.lower() in {"none", "null", "false", "no"} else args.report_to
 
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         mixed_precision=args.mixed_precision,
-        log_with=args.report_to,
+        log_with=report_to,
         project_config=accelerator_project_config,
     )
 
@@ -239,7 +237,7 @@ def main(args):
 
     model, optimizer, train_dataloader = accelerator.prepare(model, optimizer, train_dataloader)
 
-    if accelerator.is_main_process:
+    if accelerator.is_main_process and report_to is not None:
         tracker_config = vars(copy.deepcopy(args))
         accelerator.init_trackers(
             project_name="REPA", 
@@ -323,7 +321,8 @@ def main(args):
                     f"step={global_step} "
                     f"loss={logs['loss']:.6f} proj_loss={logs['proj_loss']:.6f} grad_norm={logs['grad_norm']:.3f}"
                 )
-                accelerator.log(logs, step=global_step)  # wandb log
+                if report_to is not None:
+                    accelerator.log(logs, step=global_step)
 
             ### FID evaluation
             if global_step % args.checkpointing_steps == 0 and global_step > 0:
