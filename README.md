@@ -24,7 +24,7 @@
 ### 1. Environment setup
 
 ```bash
-conda create -n repa python=3.10 -y
+conda create -n repa python=3.13 -y
 conda activate repa
 pip install -r requirements.txt
 

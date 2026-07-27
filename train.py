@@ -17,11 +17,11 @@ from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
 
 from models.sit import SiT_models
+from models.SDVAE import AutoencoderKL
 from loss import SILoss
 from utils import load_encoders
 
 from dataset import CustomDataset
-from diffusers.models import AutoencoderKL
 import math
 from torchvision.utils import make_grid
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
@@ -153,6 +153,8 @@ def main(args):
     
     # Create DINO, SiT, VAE:
     assert args.resolution % 8 == 0, "Image size must be divisible by 8 (for the VAE encoder)."
+    if args.latents_scale <= 0:
+        raise ValueError("--latents-scale must be positive.")
     latent_size = args.resolution // 8
 
     if args.enc_type != None:
@@ -172,11 +174,13 @@ def main(args):
 
     model = model.to(device)
     ema = deepcopy(model).to(device)  # Create an EMA of the model for use after training
-    vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-mse").to(device)
+    vae = AutoencoderKL.from_checkpoint(args.vae_checkpoint).to(device)
+    vae.eval()
+    requires_grad(vae, False)
     requires_grad(ema, False)
     
-    latents_scale = torch.tensor([0.18215, 0.18215, 0.18215, 0.18215]).view(1, 4, 1, 1).to(device)
-    latents_bias = torch.tensor([0., 0., 0., 0.]).view(1, 4, 1, 1).to(device)
+    latents_scale = torch.full((1, 4, 1, 1), args.latents_scale, device=device)
+    latents_bias = torch.zeros((1, 4, 1, 1), device=device)
 
     # create loss function
     loss_fn = SILoss(
@@ -364,9 +368,9 @@ def main(args):
                         else:
                             raise NotImplementedError()
 
-                        latents_scale = torch.tensor([0.18215, 0.18215, 0.18215, 0.18215, ]).view(1, 4, 1, 1).to(device)
-                        latents_bias = -torch.tensor([0., 0., 0., 0., ]).view(1, 4, 1, 1).to(device)
-                        samples = vae.decode((samples - latents_bias) / latents_scale).sample
+                        samples = vae.decode(
+                            (samples - latents_bias) / latents_scale
+                        )
                         samples = (samples + 1) / 2.
                         samples = torch.clamp(255. * samples, 0, 255).permute(0, 2, 3, 1).to("cpu", dtype=torch.uint8).numpy()
 
@@ -417,6 +421,21 @@ def parse_args(input_args=None):
     parser.add_argument("--encoder_depth", type=int, default=8)
     parser.add_argument("--fused_attn", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--qk_norm",  action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
+        "--vae-checkpoint",
+        "--vae_checkpoint",
+        dest="vae_checkpoint",
+        type=str,
+        default="/home/ningmang/eqvae/exps/imagenet256_SDVAE_ft/checkpoints/40000.ckpt",
+    )
+    parser.add_argument(
+        "--latents-scale",
+        "--latents_scale",
+        dest="latents_scale",
+        type=float,
+        required=True,
+        help="Scaling factor computed from the EQ-VAE latent statistics.",
+    )
 
     # dataset
     parser.add_argument("--data_dir", type=str, default="../data/imagenet256")
