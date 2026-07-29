@@ -73,7 +73,7 @@ def sample_posterior(moments, latents_scale=1., latents_bias=0.):
     
     mean, std = torch.chunk(moments, 2, dim=1)
     z = mean + std * torch.randn_like(mean)
-    z = (z * latents_scale + latents_bias) 
+    z = (z - latents_bias) * latents_scale
     return z 
 
 
@@ -180,7 +180,7 @@ def main(args):
     requires_grad(ema, False)
     
     latents_scale = torch.full((1, 4, 1, 1), args.latents_scale, device=device)
-    latents_bias = torch.zeros((1, 4, 1, 1), device=device)
+    latents_bias = torch.full((1, 4, 1, 1), args.latents_bias, device=device)
 
     # create loss function
     loss_fn = SILoss(
@@ -369,7 +369,7 @@ def main(args):
                             raise NotImplementedError()
 
                         samples = vae.decode(
-                            (samples - latents_bias) / latents_scale
+                            samples / latents_scale + latents_bias
                         )
                         samples = (samples + 1) / 2.
                         samples = torch.clamp(255. * samples, 0, 255).permute(0, 2, 3, 1).to("cpu", dtype=torch.uint8).numpy()
@@ -428,13 +428,11 @@ def parse_args(input_args=None):
         type=str,
         default="/home/ningmang/eqvae/exps/imagenet256_SDVAE_ft/checkpoints/40000.ckpt",
     )
-    parser.add_argument(
-        "--latents-scale",
-        "--latents_scale",
-        dest="latents_scale",
-        type=float,
-        required=True,
-        help="Scaling factor computed from the EQ-VAE latent statistics.",
+    parser.add_argument("--latents_scale", dest="latents_scale", type=float, default=1.0,
+        required=True, help="Scaling factor computed from the EQ-VAE latent statistics.",
+    )
+    parser.add_argument("--latents_bias", dest="latents_bias", type=float, default=0.0,
+        required=True, help="Mean computed from the EQ-VAE latent statistics.",
     )
 
     # dataset
