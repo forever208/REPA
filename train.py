@@ -217,7 +217,8 @@ def main(args):
         shuffle=True,
         num_workers=args.num_workers,
         pin_memory=True,
-        drop_last=True
+        drop_last=True,
+        prefetch_factor=args.pre_fetch,
     )
     if accelerator.is_main_process:
         logger.info(f"Dataset contains {len(train_dataset):,} images ({args.data_dir})")
@@ -249,7 +250,13 @@ def main(args):
             init_kwargs={"wandb": {"name": f"{args.exp_name}"}},
         )
         
-    progress_bar = tqdm(range(0, args.max_train_steps), initial=global_step, desc="Steps", disable=not accelerator.is_local_main_process)
+    progress_bar = tqdm(
+        range(0, args.max_train_steps),
+        initial=global_step,
+        desc="Steps",
+        disable=not accelerator.is_local_main_process,
+        mininterval=5.0,
+    )
     for epoch in range(args.epochs):
         model.train()
         for raw_image, x, y in train_dataloader:
@@ -318,7 +325,7 @@ def main(args):
                 "proj_loss": accelerator.gather(proj_loss_mean).mean().detach().item(),
                 "grad_norm": accelerator.gather(grad_norm).mean().detach().item()
             }
-            progress_bar.set_postfix(**logs)
+            progress_bar.set_postfix(**logs, refresh=False)
 
             if accelerator.is_main_process and (global_step == 1 or global_step % args.log_every == 0):
                 logger.info(
@@ -461,6 +468,7 @@ def parse_args(input_args=None):
 
     # cpu
     parser.add_argument("--num_workers", type=int, default=8)
+    parser.add_argument("--pre_fetch", type=int, default=2)
 
     # loss
     parser.add_argument("--path_type", type=str, default="linear", choices=["linear", "cosine"])
