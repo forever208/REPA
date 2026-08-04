@@ -6,39 +6,23 @@
 
 """
 Samples a large number of images from a pre-trained SiT model using DDP.
-Subsequently saves a .npz file that can be used to compute FID and other
-evaluation metrics via the ADM repo: https://github.com/openai/guided-diffusion/tree/main/evaluations
+Computes FID against reference statistics and removes the temporary samples.
 
 For a simple single-GPU/CPU sampling script, see sample.py.
 """
 import torch
 import torch.distributed as dist
 from models.sit import SiT_models
-from diffusers.models import AutoencoderKL
+from models.SDVAE import AutoencoderKL
+from tools.fid_score import calculate_fid_given_paths
 from tqdm import tqdm
 import os
+import shutil
 from PIL import Image
-import numpy as np
 import math
 import argparse
 from samplers import euler_sampler, euler_maruyama_sampler
 from utils import load_legacy_checkpoints, download_model
-
-def create_npz_from_sample_folder(sample_dir, num=50_000):
-    """
-    Builds a single .npz file from a folder of .png samples.
-    """
-    samples = []
-    for i in tqdm(range(num), desc="Building .npz file from samples"):
-        sample_pil = Image.open(f"{sample_dir}/{i:06d}.png")
-        sample_np = np.asarray(sample_pil).astype(np.uint8)
-        samples.append(sample_np)
-    samples = np.stack(samples)
-    assert samples.shape == (num, samples.shape[1], samples.shape[2], 3)
-    npz_path = f"{sample_dir}.npz"
-    np.savez(npz_path, arr_0=samples)
-    print(f"Saved .npz file to {npz_path} [shape={samples.shape}].")
-    return npz_path
 
 
 def main(args):
@@ -47,6 +31,10 @@ def main(args):
     """
     torch.backends.cuda.matmul.allow_tf32 = args.tf32  # True: fast but may lead to some small numerical differences
     assert torch.cuda.is_available(), "Sampling with DDP requires at least one GPU. sample.py supports CPU-only usage"
+    if args.latents_scale <= 0:
+        raise ValueError("--latents-scale must be positive.")
+    if args.num_fid_samples <= 0:
+        raise ValueError("--num-fid-samples must be positive.")
     torch.set_grad_enabled(False)
 
     # Setup DDP:cd
@@ -78,23 +66,34 @@ def main(args):
         assert int(args.projector_embed_dims.split(',')[0]) == 768
         state_dict = download_model('last.pt')
     else:  # load a custom trained SiT checkpoint
-        state_dict = torch.load(ckpt_path, map_location=f'cuda:{device}')['ema']
+        state_dict = torch.load(
+            ckpt_path,
+            map_location=f"cuda:{device}",
+            weights_only=False,
+        )["ema"]
 
     if args.legacy:
         state_dict = load_legacy_checkpoints(state_dict=state_dict, encoder_depth=args.encoder_depth)
     model.load_state_dict(state_dict)
     model.eval()  # important!
-    vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-{args.vae}").to(device)
+    vae = AutoencoderKL.from_checkpoint(args.vae_checkpoint).to(device)
+    vae.eval()
+    vae.requires_grad_(False)
+    latents_scale = torch.full((1, 4, 1, 1), args.latents_scale, device=device)
+    latents_bias = torch.full((1, 4, 1, 1), args.latents_bias, device=device)
     assert args.cfg_scale >= 1.0, "In almost all cases, cfg_scale be >= 1.0"
-    using_cfg = args.cfg_scale > 1.0
 
     # Create folder to save samples:
     model_string_name = args.model.replace("/", "-")
     ckpt_string_name = os.path.basename(args.ckpt).replace(".pt", "") if args.ckpt else "pretrained"
-    folder_name = f"{model_string_name}-{ckpt_string_name}-size-{args.resolution}-vae-{args.vae}-" \
+    vae_string_name = os.path.splitext(os.path.basename(args.vae_checkpoint))[0]
+    folder_name = f"{model_string_name}-{ckpt_string_name}-size-{args.resolution}-vae-{vae_string_name}-" \
+                  f"scale-{args.latents_scale}-bias-{args.latents_bias}-" \
                   f"cfg-{args.cfg_scale}-seed-{args.global_seed}-{args.mode}"
     sample_folder_dir = f"{args.sample_dir}/{folder_name}"
     if rank == 0:
+        if os.path.isdir(sample_folder_dir):
+            shutil.rmtree(sample_folder_dir)
         os.makedirs(sample_folder_dir, exist_ok=True)
         print(f"Saving .png samples at {sample_folder_dir}")
     dist.barrier()
@@ -140,22 +139,24 @@ def main(args):
             else:
                 raise NotImplementedError()
 
-            latents_scale = torch.tensor([0.18215, 0.18215, 0.18215, 0.18215, ]).view(1, 4, 1, 1).to(device)
-            latents_bias = -torch.tensor([0., 0., 0., 0.,]).view(1, 4, 1, 1).to(device)
-            samples = vae.decode((samples -  latents_bias) / latents_scale).sample
+            samples = vae.decode(samples / latents_scale + latents_bias)
             samples = (samples + 1) / 2.
             samples = torch.clamp(255. * samples, 0, 255).permute(0, 2, 3, 1).to("cpu", dtype=torch.uint8).numpy()
 
             # Save samples to disk as individual .png files
             for i, sample in enumerate(samples):
                 index = i * dist.get_world_size() + rank + total
+                if index >= args.num_fid_samples:
+                    break
                 Image.fromarray(sample).save(f"{sample_folder_dir}/{index:06d}.png")
         total += global_batch_size
 
-    # Make sure all processes have finished saving their samples before attempting to convert to .npz
+    # Make sure all processes have finished saving samples before computing FID.
     dist.barrier()
     if rank == 0:
-        create_npz_from_sample_folder(sample_folder_dir, args.num_fid_samples)
+        fid = calculate_fid_given_paths((args.fid_stat, sample_folder_dir))
+        print(f"fid{args.num_fid_samples}={fid}")
+        shutil.rmtree(sample_folder_dir)
         print("Done.")
     dist.barrier()
     dist.destroy_process_group()
@@ -183,11 +184,34 @@ if __name__ == "__main__":
     parser.add_argument("--qk-norm", action=argparse.BooleanOptionalAction, default=False)
 
     # vae
-    parser.add_argument("--vae",  type=str, choices=["ema", "mse"], default="ema")
+    parser.add_argument(
+        "--vae-checkpoint",
+        "--vae_checkpoint",
+        dest="vae_checkpoint",
+        type=str,
+        required=True,
+    )
+    parser.add_argument(
+        "--latents-scale",
+        "--latents_scale",
+        dest="latents_scale",
+        type=float,
+        required=True,
+        help="Scaling factor computed from the SDVAE latent statistics.",
+    )
+    parser.add_argument(
+        "--latents-bias",
+        "--latents_bias",
+        dest="latents_bias",
+        type=float,
+        required=True,
+        help="Mean computed from the SDVAE latent statistics.",
+    )
 
     # number of samples
     parser.add_argument("--per-proc-batch-size", type=int, default=32)
     parser.add_argument("--num-fid-samples", type=int, default=50_000)
+    parser.add_argument("--fid-stat", "--fid_stat", dest="fid_stat", type=str, required=True)
 
     # sampling related hyperparameters
     parser.add_argument("--mode", type=str, default="ode")
