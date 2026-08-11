@@ -33,7 +33,7 @@ train.py --allow_tf32 --mixed_precision="fp16" --seed=0 --report_to none \
 --fid_stat="/home/ningmang/REPA/asset/fid_stats_imagenet256_guided_diffusion.npz" \
 --sample_path="$LOG_DIR/FID_samples" --num_workers 4 --pre_fetch 2 \
 --data_dir="/mnt/vepfs/base2/stream/ningmang/datasets/imagenet256_DSM_40k" \
---vae-checkpoint="/home/ningmang/eqvae/exps/imagenet256_DSM_ft/checkpoints/40000.ckpt" \
+--vae-checkpoint="/home/ningmang/vae/exps/imagenet256_DSM_ft/checkpoints/40000.ckpt" \
 --proj_coeff=0.5 --latents_scale=0.2228 --latents_bias=-0.2901 \
 
 # sslaunch submit -j ningmang -n 1 -c zhongwei -q stream -- sleep infinity

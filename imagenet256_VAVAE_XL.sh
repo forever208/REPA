@@ -33,7 +33,7 @@ train_f16.py --allow_tf32 --mixed_precision="fp16" --seed=0 --report_to none \
 --fid_stat="/home/ningmang/REPA/asset/fid_stats_imagenet256_guided_diffusion.npz" \
 --sample_path="$LOG_DIR/FID_samples" --num_workers 4 --pre_fetch 2 \
 --data_dir="/mnt/vepfs/base2/stream/ningmang/datasets/imagenet256_VAVAE" \
---vae-checkpoint="/home/ningmang/eqvae/exps/imagenet256_VAVAE/vavae-imagenet256-f16d32-dinov2.pt" \
+--vae-checkpoint="/home/ningmang/vae/exps/imagenet256_VAVAE/vavae-imagenet256-f16d32-dinov2.pt" \
 --proj_coeff=0.5 --latents_scale=0.2837 --latents_bias=0.1900 \
 
 # sslaunch submit -j vaveexl -c zhongwei -q stream -n 1 --no-log -- bash imagenet256_VAVAE_XL.sh
