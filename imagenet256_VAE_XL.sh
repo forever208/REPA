@@ -27,7 +27,7 @@ train.py --allow_tf32 --mixed_precision="fp16" --seed=0 --report_to none \
 --path_type="linear" --prediction="v" --weighting="uniform" \
 --model="SiT-XL/2" --enc_type="dinov2-vit-b" --encoder_depth=8 --exp_name="linear-dinov2-b-enc8" \
 --checkpointing_steps=100000 --max_train_steps=1000001 --output_dir="$LOG_DIR" \
---num_samples=50000 --num_steps=250 --mode=sde --cfg_scale=1.8 --guidance_high=0.7 \
+--num_samples=50000 --num_steps=250 --mode=sde --cfg_scale=2.0 --guidance_high=0.7 \
 --fid_stat="/home/ningmang/REPA/asset/fid_stats_imagenet256_guided_diffusion.npz" \
 --sample_path="$LOG_DIR/FID_samples" --num_workers 4 --pre_fetch 2 \
 --data_dir="/mnt/vepfs/base2/stream/ningmang/datasets/imagenet256_DSM_05lpips_40k" \
