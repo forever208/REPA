@@ -1,6 +1,5 @@
 """REPA training entry point for VA-VAE f16d32 latents."""
 
-import argparse
 import copy
 from copy import deepcopy
 import json
@@ -20,7 +19,7 @@ from tqdm.auto import tqdm
 from dataset import CustomDataset
 from loss import SILoss
 from models.sit import SiT_models
-from models.VAVAE import AutoencoderKL, DEFAULT_CONFIG
+from models.VAVAE import AutoencoderKL
 from samplers import euler_maruyama_sampler, euler_sampler
 from tools.fid_score import calculate_fid_given_paths
 from train import (
@@ -36,13 +35,6 @@ from utils import load_encoders
 
 LATENT_CHANNELS = 32
 VAE_DOWNSAMPLE_FACTOR = 16
-DEFAULT_CHECKPOINT = (
-    "/home/ningmang/eqvae/exps/imagenet256_VAVAE/"
-    "vavae-imagenet256-f16d32-dinov2.pt"
-)
-SDVAE_DEFAULT_CHECKPOINT = (
-    "/home/ningmang/eqvae/exps/imagenet256_SDVAE_ft/checkpoints/40000.ckpt"
-)
 
 
 def main(args):
@@ -107,9 +99,7 @@ def main(args):
     )
     model = model.to(device)
     ema = deepcopy(model).to(device)
-    vae = AutoencoderKL.from_checkpoint(
-        args.vae_checkpoint, config_path=args.vae_config
-    ).to(device)
+    vae = AutoencoderKL.from_checkpoint(args.vae_checkpoint).to(device)
     vae.eval()
     requires_grad(vae, False)
     requires_grad(ema, False)
@@ -379,16 +369,5 @@ def main(args):
     accelerator.end_training()
 
 
-def parse_f16_args():
-    f16_parser = argparse.ArgumentParser(add_help=False)
-    f16_parser.add_argument("--vae-config", default=DEFAULT_CONFIG)
-    f16_args, remaining = f16_parser.parse_known_args()
-    args = parse_args(remaining)
-    args.vae_config = f16_args.vae_config
-    if args.vae_checkpoint == SDVAE_DEFAULT_CHECKPOINT:
-        args.vae_checkpoint = DEFAULT_CHECKPOINT
-    return args
-
-
 if __name__ == "__main__":
-    main(parse_f16_args())
+    main(parse_args())

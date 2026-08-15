@@ -25,7 +25,7 @@ export CUDA_VISIBLE_DEVICES=4,5,6,7
 export MASTER_PORT=29047
 
 accelerate launch --multi_gpu --num_machines 1 --num_processes 4 \
-train_f16.py --allow_tf32 --mixed_precision="fp16" --seed=0 --report_to none \
+train_vavae.py --allow_tf32 --mixed_precision="fp16" --seed=0 --report_to none \
 --path_type="linear" --prediction="v" --weighting="uniform" \
 --model="SiT-B/1" --enc_type="dinov2-vit-b" --encoder_depth=4 --exp_name="linear-dinov2-b-enc4" \
 --checkpointing_steps=100000 --output_dir="$LOG_DIR" \

@@ -9,7 +9,7 @@ import torch.nn as nn
 from models.SDVAE import Decoder, DiagonalGaussianDistribution, Encoder
 
 
-DEFAULT_CONFIG = "/home/ningmang/eqvae/configs/VAVAE_config_imgnet256.yaml"
+CONFIG_PATH = Path(__file__).with_name("VAVAE_config_imgnet256.yaml")
 
 
 class AutoencoderKL(nn.Module):
@@ -63,16 +63,15 @@ class AutoencoderKL(nn.Module):
         return self
 
     @classmethod
-    def from_checkpoint(cls, checkpoint_path, config_path=DEFAULT_CONFIG):
-        config_path = Path(config_path).expanduser()
-        if not config_path.is_file():
-            raise FileNotFoundError(f"VA-VAE config not found: {config_path}")
+    def from_checkpoint(cls, checkpoint_path):
+        if not CONFIG_PATH.is_file():
+            raise FileNotFoundError(f"VA-VAE config not found: {CONFIG_PATH}")
         try:
             OmegaConf = import_module("omegaconf").OmegaConf
         except (ImportError, AttributeError) as error:
             raise ImportError("VA-VAE config loading requires omegaconf") from error
 
-        config = OmegaConf.load(config_path)
+        config = OmegaConf.load(CONFIG_PATH)
         params = OmegaConf.to_container(config.model.params, resolve=True)
         return cls(
             ddconfig=params["ddconfig"],

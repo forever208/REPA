@@ -18,14 +18,14 @@ export MASTER_PORT=29508
 
 
 cd /home/ningmang/REPA
-LOG_DIR=/home/ningmang/REPA/REPA_exps/imagenet256_sdvae_40k_stdx1_XL
+LOG_DIR=/home/ningmang/REPA/REPA_exps/imagenet256_EQVAE_40k_stdx1_XL
 mkdir -p "${LOG_DIR}"
 TIME=$(date +%Y%m%d_%H%M%S)
 exec > "${LOG_DIR}/generate_${TIME}.log" 2>&1
-FID_LOG="${LOG_DIR}/FID_100epochs.log"
+FID_LOG="${LOG_DIR}/FID_200epochs.log"
 
-CFG_SCALES=(1.6 1.7 1.8 1.9 2.0 2.1 2.2)
-CKPT="${LOG_DIR}/linear-dinov2-b-enc8/checkpoints/0500000.pt"
+CFG_SCALES=(1.7 1.8 1.9 2.0 2.1)
+CKPT="${LOG_DIR}/linear-dinov2-b-enc8/checkpoints/1000000.pt"
 NUM_STEPS=100
 GUIDANCE_HIGH=0.7
 
@@ -39,8 +39,8 @@ for CFG_SCALE in "${CFG_SCALES[@]}"; do
     torchrun --nnodes=1 --nproc_per_node=8 --master_port="${MASTER_PORT}" generate.py \
     --model="SiT-XL/2" --encoder-depth=8 --projector-embed-dims=768 --fused-attn \
     --ckpt="${CKPT}" \
-    --vae-checkpoint="/home/ningmang/vae/exps/imagenet256_SDVAE_ft/checkpoints/40000.ckpt" \
-    --latents-scale=0.2474 --latents-bias=-0.2229 \
+    --vae-checkpoint="/home/ningmang/vae/exps/imagenet256_EQVAE_ft/checkpoints/40000.ckpt" \
+    --latents-scale=0.1901 --latents-bias=-0.4249 \
     --global-seed=0 --num-fid-samples=50000 --per-proc-batch-size=32 \
     --num-steps="${NUM_STEPS}" --mode=sde --path-type=linear --cfg-scale="${CFG_SCALE}" --guidance-high="${GUIDANCE_HIGH}" \
     --fid-stat="/home/ningmang/REPA/asset/fid_stats_imagenet256_guided_diffusion.npz" \
