@@ -19,13 +19,13 @@ export MASTER_PORT=29508
 
 
 cd /home/ningmang/REPA
-LOG_DIR=/home/ningmang/REPA/REPA_exps/imagenet256_VAVAE_stdx1_XL_enc8
+LOG_DIR=/home/ningmang/REPA/REPA_exps/imagenet256_VAVAE_stdx1_XL
 mkdir -p "${LOG_DIR}"
 TIME=$(date +%Y%m%d_%H%M%S)
 exec > "${LOG_DIR}/generate_${TIME}.log" 2>&1
-FID_LOG="${LOG_DIR}/FID_100epochs.log"
+FID_LOG="${LOG_DIR}/FID_cond.log"
 
-CFG_SCALES=(1.7 1.8 1.9 2.0 2.1)
+CFG_SCALES=(1.0)
 CKPT="${LOG_DIR}/linear-dinov2-b-enc8/checkpoints/0500000.pt"
 NUM_STEPS=100
 GUIDANCE_HIGH=0.7
@@ -58,4 +58,4 @@ for CFG_SCALE in "${CFG_SCALES[@]}"; do
     rm -f "${RUN_LOG}"
 done
 
-# sslaunch submit -j vaesample -c zhongwei -q stream -n 1 --no-log -- bash imagenet256_VAVAE_XL_generate.sh
+# sslaunch submit -j vasample -c zhongwei -q stream -n 1 --no-log -- bash imagenet256_VAVAE_XL_generate.sh
