@@ -13,3 +13,4 @@ regex==2025.11.3
 einops==0.8.1
 scipy==1.15.3
 omegaconf==2.3.1
+pytorch-lightning==2.6.5
