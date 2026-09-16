@@ -16,7 +16,7 @@ export TORCH_HOME=/home/ningmang/torch_cache
 #############################
 
 cd /home/ningmang/REPA
-LOG_DIR=/home/ningmang/REPA/REPA_exps/imagenet256_DSM_40k_mean
+LOG_DIR=/home/ningmang/REPA/REPA_exps/NoREPA_SDVAE_40k_stdx1
 mkdir -p ${LOG_DIR}
 TIME=$(date +%Y%m%d_%H%M%S)
 exec > ${LOG_DIR}/${TIME}.log 2>&1
@@ -28,13 +28,13 @@ accelerate launch --multi_gpu --num_machines 1 --num_processes 4 \
 train.py --allow_tf32 --mixed_precision="fp16" --seed=0 --report_to none \
 --path_type="linear" --prediction="v" --weighting="uniform" \
 --model="SiT-B/2" --enc_type="dinov2-vit-b" --encoder_depth=4 --exp_name="linear-dinov2-b-enc4" \
---checkpointing_steps=100000 --output_dir="$LOG_DIR" \
+--checkpointing_steps=100000 --max_train_steps=400001 --output_dir="$LOG_DIR" \
 --num_samples=50000 --num_steps=100 --mode=sde --cfg_scale=2.0 --guidance_high=0.7 \
 --fid_stat="/home/ningmang/REPA/asset/fid_stats_imagenet256_guided_diffusion.npz" \
 --sample_path="$LOG_DIR/FID_samples" --num_workers 4 --pre_fetch 2 \
---data_dir="/mnt/vepfs/base2/stream/ningmang/datasets/imagenet256_DSM_40k" \
---vae-checkpoint="/home/ningmang/vae/exps/imagenet256_DSM_ft/checkpoints/40000.ckpt" \
---proj_coeff=0.5 --latents_scale=0.2228 --latents_bias=-0.2901 \
+--data_dir="/mnt/vepfs/base2/stream/ningmang/datasets/imagenet256_SDVAE_40k" \
+--vae-checkpoint="/home/ningmang/vae/exps/imagenet256_SDVAE_ft/checkpoints/40000.ckpt" \
+--proj_coeff=0.0 --latents_scale=0.2474 --latents_bias=-0.2229 \
 
 # sslaunch submit -j ningmang -n 1 -c zhongwei -q stream -- sleep infinity
 # kubectl --kubeconfig /mnt/vepfs/base/infra/.kube/zhongweiconfig \
