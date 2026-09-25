@@ -18,14 +18,14 @@ export MASTER_PORT=29508
 
 
 cd /home/ningmang/REPA
-LOG_DIR=/home/ningmang/REPA/REPA_exps/imagenet256_sdvae_40k_stdx1_XL
+LOG_DIR=/home/ningmang/REPA/REPA_exps/NoREPA_SDVAE_40k_stdx1
 mkdir -p "${LOG_DIR}"
 TIME=$(date +%Y%m%d_%H%M%S)
 exec > "${LOG_DIR}/generate_${TIME}.log" 2>&1
 FID_LOG="${LOG_DIR}/FID_cond.log"
 
-CFG_SCALES=(1.0)
-CKPT="${LOG_DIR}/linear-dinov2-b-enc8/checkpoints/0500000.pt"
+CFG_SCALES=(3.6 3.7 3.8)
+CKPT="${LOG_DIR}/linear-dinov2-b-enc4/checkpoints/0400000.pt"
 NUM_STEPS=100
 GUIDANCE_HIGH=0.7
 
@@ -37,7 +37,7 @@ for CFG_SCALE in "${CFG_SCALES[@]}"; do
     echo "Generating samples with cfg-scale=${CFG_SCALE}"
     RUN_LOG=$(mktemp "${LOG_DIR}/.fid_run_XXXXXX")
     torchrun --nnodes=1 --nproc_per_node=8 --master_port="${MASTER_PORT}" generate.py \
-    --model="SiT-XL/2" --encoder-depth=8 --projector-embed-dims=768 --fused-attn \
+    --model="SiT-B/2" --encoder-depth=4 --projector-embed-dims=768 --fused-attn \
     --ckpt="${CKPT}" \
     --vae-checkpoint="/home/ningmang/vae/exps/imagenet256_SDVAE_ft/checkpoints/40000.ckpt" \
     --latents-scale=0.2474 --latents-bias=-0.2229 \
@@ -57,4 +57,4 @@ for CFG_SCALE in "${CFG_SCALES[@]}"; do
     rm -f "${RUN_LOG}"
 done
 
-# sslaunch submit -j sdsample -c zhongwei -q stream -n 1 --no-log -- bash imagenet256_SDVAE_XL_generate.sh
+# sslaunch submit -j sdsample -c zhongwei -q stream -n 1 --no-log -- bash imagenet256_VAE_generate.sh
