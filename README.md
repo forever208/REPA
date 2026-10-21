@@ -1,8 +1,6 @@
 # REPA Supporting Multiple VAEs and Online FID Evaluation
 
-This repository is built on the official [REPA implementation](https://github.com/sihyun-yu/REPA) of
-[Representation Alignment for Generation: Training Diffusion Transformers Is Easier Than You Think](https://arxiv.org/abs/2410.06940).
-REPA aligns diffusion transformer features with representations from pretrained visual encoders to improve diffusion training.
+This repository is built on the official [REPA implementation](https://github.com/sihyun-yu/REPA).
 
 This fork adds support for **SD-VAE, EQ-VAE, DSM, and VA-VAE**, along with **online FID evaluation during training** and standalone distributed FID evaluation. The examples below train and evaluate class-conditional SiT models on ImageNet at 256 × 256 resolution.
 
