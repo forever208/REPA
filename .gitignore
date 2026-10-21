@@ -3,4 +3,5 @@
 __pycache__/
 wandb
 REPA_exps/
-asset/
+/asset/*
+!/asset/fid_stats_imagenet256_guided_diffusion.npz
